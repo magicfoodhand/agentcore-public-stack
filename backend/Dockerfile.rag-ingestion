@@ -3,9 +3,9 @@
 # ==========================================
 # Note: AWS Lambda base images support both x86_64 and ARM64
 # CDK will build for the specified architecture via --platform flag
-# Using Python 3.12 on Amazon Linux 2023 (AL2023) which has glibc 2.34
+# Using Python 3.14 on Amazon Linux 2023 (AL2023) which has glibc 2.34
 # This allows us to use PyTorch 2.7+ which requires manylinux_2_28 (glibc 2.28)
-FROM public.ecr.aws/lambda/python:3.12 AS builder
+FROM public.ecr.aws/lambda/python:3.14 AS builder
 
 # 1. Install system tools
 # Rust/GCC are needed for compiling dependencies like tiktoken or docling-core
@@ -31,11 +31,12 @@ RUN mkdir -p /tmp/models/docling-artifacts \
   /tmp/models/tiktoken_cache \
   /tmp/packages
 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # 4. Install PyTorch CPU *Explicitly*
 # Installing before requirements.txt ensures we get the lightweight CPU version and not the version that includes GPU support
 # AL2023 has glibc 2.34, so we can use the latest PyTorch with manylinux_2_28 wheels
 # Note: transformers 4.45+ requires torch >= 2.6 (see https://github.com/huggingface/transformers/issues/38464)
-RUN pip install \
+RUN uv pip install \
   --target /tmp/packages \
   --no-cache-dir \
   --index-url https://download.pytorch.org/whl/cpu \
@@ -44,7 +45,7 @@ RUN pip install \
 # 5. Install Your Requirements
 # IMPORTANT: `requirements.txt` pins SciPy to a Lambda-compatible wheel (manylinux2014).
 COPY ./backend/src/apis/app_api/documents/ingestion/requirements.txt .
-RUN pip install \
+RUN uv pip install \
   --target /tmp/packages \
   --no-cache-dir \
   -r requirements.txt
@@ -77,7 +78,7 @@ RUN rm -rf /tmp/models/docling-artifacts/easyocr \
 # ==========================================
 # STAGE 2: Runtime (Production Image)
 # ==========================================
-FROM public.ecr.aws/lambda/python:3.12
+FROM public.ecr.aws/lambda/python:3.14
 
 # 1. Install only runtime system libs (GL/Glib for CV2)
 # AL2023 uses dnf as package manager
