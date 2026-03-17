@@ -32,12 +32,12 @@ interface AuthProviderPublicListResponse {
         <!-- Logo -->
         <div class="mb-8 flex justify-center">
           <img
-            src="/img/logo-light.png"
-            alt="Logo"
+            src="/img/logo-light.svg"
+            alt="In a Pinch Logo"
             class="size-16 dark:hidden">
           <img
-            src="/img/logo-dark.png"
-            alt="Logo"
+            src="/img/logo-dark.svg"
+            alt="In a Pinch Logo"
             class="hidden size-16 dark:block">
         </div>
 

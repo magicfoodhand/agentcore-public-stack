@@ -8,6 +8,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from .models import User
+from .userinfo import fetch_userinfo, enrich_user_from_userinfo
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,22 @@ def _get_user_sync_service():
 
 # HTTP Bearer token security scheme with auto_error=False to handle missing tokens manually
 security = HTTPBearer(auto_error=False)
+
+
+async def _enrich_user_from_userinfo(user: User, provider, token: str) -> None:
+    """Fetch missing profile claims from the provider's userinfo endpoint."""
+    if (user.email and user.name) or not provider or not provider.userinfo_endpoint:
+        return
+    try:
+        claims = await fetch_userinfo(
+            userinfo_endpoint=provider.userinfo_endpoint,
+            access_token=token,
+            user_id=user.user_id,
+        )
+        if claims:
+            enrich_user_from_userinfo(user, claims, provider)
+    except Exception as e:
+        logger.warning(f"Failed to enrich user {user.user_id} from userinfo: {e}")
 
 
 async def _sync_user_background(sync_service, user: User) -> None:
@@ -116,6 +133,9 @@ async def get_current_user(
             if provider:
                 user = generic_validator.validate_token(token, provider)
                 user.raw_token = token
+
+                # Enrich missing profile claims from userinfo endpoint
+                await _enrich_user_from_userinfo(user, provider, token)
 
                 # Fire-and-forget sync to Users table
                 sync_service = _get_user_sync_service()
@@ -248,6 +268,9 @@ async def get_current_user_trusted(
                     )
 
                     logger.debug("[get_current_user_trusted] User authenticated successfully via provider path")
+
+                    # Enrich missing profile claims from userinfo endpoint
+                    await _enrich_user_from_userinfo(user, provider, token)
 
                     sync_service = _get_user_sync_service()
                     if sync_service and sync_service.enabled:

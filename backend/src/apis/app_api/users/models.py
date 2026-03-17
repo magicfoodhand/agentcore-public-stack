@@ -20,6 +20,16 @@ class UserSearchResponse(BaseModel):
     users: List[UserSearchResult] = Field(..., description="List of matching users")
 
 
+class UserMeResponse(BaseModel):
+    """Response model for GET /users/me — the authenticated user's profile."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    user_id: str = Field(..., alias="userId", description="User identifier")
+    email: str = Field(..., description="User email address")
+    name: str = Field(..., description="User display name")
+    picture: Optional[str] = Field(None, description="Profile picture URL")
+
+
 class UserPermissionsResponse(BaseModel):
     """Response model for user effective permissions resolved from AppRoles."""
     model_config = ConfigDict(populate_by_name=True)

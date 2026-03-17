@@ -55,3 +55,33 @@ export const adminGuard: CanActivateFn = async (route, state) => {
 
   return true;
 };
+
+/**
+ * ⚠ ⚠️  IMPORTANT: Update Google API credentials before using search tools
+[INFO] 
+[INFO] The secret was created with placeholder values. Update with real credentials:
+[INFO] 
+[INFO]   aws secretsmanager put-secret-value \
+[INFO]     --secret-id ai-inapinch-io/mcp/google-credentials \
+[INFO]     --secret-string '{"api_key":"YOUR_API_KEY","search_engine_id":"YOUR_ENGINE_ID"}' \
+[INFO]     --region us-west-2
+[INFO] 
+[INFO] Get credentials from:
+[INFO]   - API Key: https://console.cloud.google.com/apis/credentials
+[INFO]   - Search Engine ID: https://programmablesearchengine.google.com/
+[INFO] 
+[INFO] ============================================================
+[INFO] 
+[INFO] 1. Test Gateway connectivity:
+[INFO]    aws bedrock-agentcore list-gateway-targets \
+[INFO]      --gateway-identifier ${GATEWAY_ID} \
+[INFO]      --region us-west-2
+[INFO] 
+[INFO] 2. View Gateway details in AWS Console:
+[INFO]    https://console.aws.amazon.com/bedrock/home?region=us-west-2#/agentcore/gateways
+[INFO] 
+[INFO] 3. Integrate with AgentCore Runtime:
+[INFO]    - Update Runtime environment with Gateway URL from SSM
+[INFO]    - Ensure Runtime execution role has bedrock-agentcore:InvokeGateway permission
+[INFO] 
+ */

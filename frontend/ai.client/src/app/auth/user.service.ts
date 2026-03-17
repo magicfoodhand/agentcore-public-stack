@@ -64,12 +64,19 @@ export class UserService {
 
   /**
    * Decode and update user information from JWT token.
+   * If the token lacks profile claims (email, name), fetches
+   * the enriched profile from the backend /users/me endpoint.
    * @param token JWT access token
    */
   private updateUserFromToken(token: string): void {
     try {
       const user = this.decodeToken(token);
       this.currentUser.set(user);
+
+      // If profile claims are missing from the token, fetch from backend
+      if (!user.email || !user.fullName) {
+        this.fetchUserProfile();
+      }
     } catch (error) {
       console.error('Failed to decode user from token:', error);
       this.currentUser.set(null);
@@ -189,6 +196,40 @@ export class UserService {
     const user = this.currentUser();
     if (!user) return false;
     return roles.some(role => user.roles.includes(role));
+  }
+
+  /**
+   * Fetch the enriched user profile from the backend.
+   * Called when the JWT access token lacks profile claims (email, name).
+   * The backend enriches the user via the OIDC userinfo endpoint.
+   */
+  private async fetchUserProfile(): Promise<void> {
+    try {
+      const url = `${this.config.appApiUrl()}/users/me`;
+      const profile = await firstValueFrom(
+        this.http.get<{ userId: string; email: string; name: string; picture?: string }>(url)
+      );
+
+      const current = this.currentUser();
+      if (!current) return;
+
+      // Parse name into first/last
+      const nameParts = (profile.name || '').split(' ');
+      const firstName = nameParts[0] || current.firstName;
+      const lastName = nameParts.slice(1).join(' ') || current.lastName;
+      const fullName = profile.name || current.fullName;
+
+      this.currentUser.set({
+        ...current,
+        email: profile.email || current.email,
+        firstName,
+        lastName,
+        fullName,
+        picture: profile.picture || current.picture,
+      });
+    } catch (error) {
+      console.error('Failed to fetch user profile from backend:', error);
+    }
   }
 
   /**

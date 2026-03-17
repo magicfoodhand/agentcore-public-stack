@@ -9,7 +9,7 @@ from apis.shared.auth.models import User
 from apis.shared.rbac.service import get_app_role_service
 from apis.shared.users.repository import UserRepository
 from apis.shared.users.models import UserProfile, UserListItem, UserStatus
-from .models import UserSearchResult, UserSearchResponse, UserPermissionsResponse
+from .models import UserMeResponse, UserSearchResult, UserSearchResponse, UserPermissionsResponse
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,25 @@ router = APIRouter(prefix="/users", tags=["users"])
 def get_user_repository() -> UserRepository:
     """Get user repository instance."""
     return UserRepository()
+
+
+@router.get("/me", response_model=UserMeResponse)
+async def get_me(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return the authenticated user's profile.
+
+    The User object is enriched by the auth dependency — if the JWT
+    access token lacked profile claims (email, name, picture), they
+    were fetched from the provider's OIDC userinfo endpoint.
+    """
+    return UserMeResponse(
+        user_id=current_user.user_id,
+        email=current_user.email,
+        name=current_user.name,
+        picture=current_user.picture,
+    )
 
 
 @router.get("/me/permissions", response_model=UserPermissionsResponse)

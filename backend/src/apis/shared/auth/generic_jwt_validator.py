@@ -234,7 +234,7 @@ class GenericOIDCJWTValidator:
             return User(
                 email=str(email).lower() if email else "",
                 user_id=str(user_id),
-                name=str(name) if name else str(email) or "",
+                name=str(name) if name else (str(email) if email else ""),
                 roles=roles,
                 picture=picture,
             )
