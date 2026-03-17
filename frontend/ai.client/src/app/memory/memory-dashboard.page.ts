@@ -559,6 +559,12 @@ export class MemoryDashboardPage {
   readonly searchResults = signal<MemoriesResponse | null>(null);
   readonly deletingMemoryId = signal<string | null>(null);
 
+  /**
+   * Tracks record IDs that have been successfully deleted this session.
+   * Used to filter them out of the UI even if the backend returns stale data.
+   */
+  private readonly deletedRecordIds = signal<Set<string>>(new Set());
+
   // Computed values
   readonly isMemoryAvailable = computed(() => {
     const status = this.memoryStatus.value();
@@ -567,12 +573,16 @@ export class MemoryDashboardPage {
 
   readonly preferences = computed(() => {
     const data = this.allMemories.value();
-    return data?.preferences?.memories ?? [];
+    const deleted = this.deletedRecordIds();
+    const memories = data?.preferences?.memories ?? [];
+    return memories.filter(m => !m.recordId || !deleted.has(m.recordId));
   });
 
   readonly facts = computed(() => {
     const data = this.allMemories.value();
-    return data?.facts?.memories ?? [];
+    const deleted = this.deletedRecordIds();
+    const memories = data?.facts?.memories ?? [];
+    return memories.filter(m => !m.recordId || !deleted.has(m.recordId));
   });
 
   readonly preferencesCount = computed(() => this.preferences().length);
@@ -623,19 +633,45 @@ export class MemoryDashboardPage {
   }
 
   /**
-   * Delete a memory record
+   * Delete a memory record.
+   * Optimistically removes the item from the UI immediately, then confirms
+   * with the backend. The deletedRecordIds set ensures the item stays
+   * hidden even if a subsequent reload returns stale data.
    */
   async deleteMemory(recordId: string): Promise<void> {
     if (this.deletingMemoryId()) return;
 
     this.deletingMemoryId.set(recordId);
 
+    // Optimistically add to deleted set so it disappears from the list immediately
+    this.deletedRecordIds.update(ids => {
+      const next = new Set(ids);
+      next.add(recordId);
+      return next;
+    });
+
+    // Also remove from search results immediately
+    const currentSearch = this.searchResults();
+    if (currentSearch) {
+      this.searchResults.set({
+        ...currentSearch,
+        memories: currentSearch.memories.filter(m => m.recordId !== recordId),
+        totalCount: currentSearch.totalCount - 1,
+      });
+    }
+
     try {
       await this.memoryService.deleteMemory(recordId);
-      // Reload memories after successful deletion
+      // Reload in the background to sync with backend
       this.memoryService.reload();
     } catch (error) {
       console.error('Failed to delete memory:', error);
+      // Rollback: remove from deleted set so it reappears
+      this.deletedRecordIds.update(ids => {
+        const next = new Set(ids);
+        next.delete(recordId);
+        return next;
+      });
     } finally {
       this.deletingMemoryId.set(null);
     }
