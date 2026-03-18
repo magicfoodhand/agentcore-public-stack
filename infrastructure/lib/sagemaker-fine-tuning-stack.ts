@@ -156,8 +156,26 @@ export class SageMakerFineTuningStack extends cdk.Stack {
       ],
       lifecycleRules: [
         {
+          id: 'transition-to-ia',
+          transitions: [
+            {
+              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: cdk.Duration.days(30),
+            },
+          ],
+        },
+        {
+          id: 'transition-to-glacier',
+          transitions: [
+            {
+              storageClass: s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+              transitionAfter: cdk.Duration.days(90),
+            },
+          ],
+        },
+        {
           id: 'expire-objects',
-          expiration: cdk.Duration.days(30),
+          expiration: cdk.Duration.days(365),
         },
         {
           id: 'abort-incomplete-multipart',
@@ -186,25 +204,6 @@ export class SageMakerFineTuningStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['dynamodb:UpdateItem'],
         resources: [this.fineTuningJobsTable.tableArn],
-      })
-    );
-
-    // Grant EC2 networking permissions required for VPC-based training jobs
-    this.sagemakerExecutionRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: 'VpcNetworkingForTraining',
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'ec2:DescribeSubnets',
-          'ec2:DescribeSecurityGroups',
-          'ec2:DescribeNetworkInterfaces',
-          'ec2:DescribeVpcs',
-          'ec2:DescribeDhcpOptions',
-          'ec2:CreateNetworkInterface',
-          'ec2:CreateNetworkInterfacePermission',
-          'ec2:DeleteNetworkInterface',
-        ],
-        resources: ['*'],
       })
     );
 

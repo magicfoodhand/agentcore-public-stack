@@ -537,3 +537,22 @@ export function applyStandardTags(stack: cdk.Stack, config: AppConfig): void {
     cdk.Tags.of(stack).add(key, value);
   });
 }
+
+// ============================================================
+// CORS Origins Helper
+// Build CORS origins from explicit config + auto-derived domain
+// ============================================================
+export const buildCorsOrigins = (config: AppConfig, explicitOrigins?: string): string[] => {
+  const origins = new Set<string>();
+  // Always allow localhost for local development
+  origins.add('http://localhost:4200');
+  // Add domain-based origin if configured
+  if (config.domainName) {
+    origins.add(`https://${config.domainName}`);
+  }
+  // Add any explicitly configured origins
+  if (explicitOrigins) {
+    explicitOrigins.split(',').map(o => o.trim()).filter(Boolean).forEach(o => origins.add(o));
+  }
+  return Array.from(origins);
+};

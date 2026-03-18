@@ -18,7 +18,7 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import { Construct } from "constructs";
 import { CfnResource } from "aws-cdk-lib";
-import { AppConfig, getResourceName, applyStandardTags, getRemovalPolicy, getAutoDeleteObjects } from "./config";
+import { AppConfig, getResourceName, applyStandardTags, getRemovalPolicy, getAutoDeleteObjects, buildCorsOrigins } from "./config";
 
 export interface AppApiStackProps extends cdk.StackProps {
   config: AppConfig;
@@ -171,28 +171,9 @@ export class AppApiStack extends cdk.Stack {
     });
 
     // ============================================================
-    // CORS Origins Helper
-    // Build CORS origins from explicit config + auto-derived domain
-    // ============================================================
-    const buildCorsOrigins = (explicitOrigins?: string): string[] => {
-      const origins = new Set<string>();
-      // Always allow localhost for local development
-      origins.add('http://localhost:4200');
-      // Add domain-based origin if configured
-      if (config.domainName) {
-        origins.add(`https://${config.domainName}`);
-      }
-      // Add any explicitly configured origins
-      if (explicitOrigins) {
-        explicitOrigins.split(',').map(o => o.trim()).filter(Boolean).forEach(o => origins.add(o));
-      }
-      return Array.from(origins);
-    };
-
-    // ============================================================
     // Assistants Document Drop Bucket (RAG Injestion Drop Bucket)
     // ============================================================
-    const assistantsCorsOrigins = buildCorsOrigins(config.assistants?.corsOrigins);
+    const assistantsCorsOrigins = buildCorsOrigins(config, config.assistants?.corsOrigins);
 
     const assistantsDocumentsBucket = new s3.Bucket(this, "AssistantsDocumentBucket", {
       bucketName: getResourceName(config, "assistants-documents"),
@@ -404,137 +385,26 @@ export class AppApiStack extends cdk.Stack {
       `/${config.projectPrefix}/auth/auth-provider-secrets-arn`
     );
 
+    
     // ============================================================
-    // File Upload Storage (S3 + DynamoDB)
+    // File Uploads, created in infrastructure
     // ============================================================
+    
+    const userFilesTable = dynamodb.Table.fromTableName(
+      this,
+      `${id}-userFilesTable`,
+      ssm.StringParameter.valueForStringParameter(
+          this,
+          `/${config.projectPrefix}/file-upload/table-name`)
+    );
+    const userFilesBucket = s3.Bucket.fromBucketName(
+      this,
+      `${id}-userFilesBucket`,
+      ssm.StringParameter.valueForStringParameter(
+          this,
+          `/${config.projectPrefix}/file-upload/bucket-name`)
+    );
 
-    // Build CORS origins for file upload bucket
-    const fileUploadCorsOrigins = buildCorsOrigins(config.fileUpload?.corsOrigins);
-
-    // S3 Bucket for user file uploads
-    const userFilesBucket = new s3.Bucket(this, "UserFilesBucket", {
-      // Include account ID for global uniqueness
-      bucketName: getResourceName(config, "user-files", config.awsAccount),
-
-      // Security configuration
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      enforceSSL: true,
-      versioned: false,
-
-      // Removal policy based on retention configuration
-      removalPolicy: getRemovalPolicy(config),
-      autoDeleteObjects: getAutoDeleteObjects(config),
-
-      // CORS for browser-based pre-signed URL uploads
-      cors: [
-        {
-          allowedOrigins: fileUploadCorsOrigins,
-          allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.HEAD],
-          allowedHeaders: ["Content-Type", "Content-Length", "x-amz-*"],
-          exposedHeaders: ["ETag", "Content-Length", "Content-Type"],
-          maxAge: 3600,
-        },
-      ],
-
-      // Intelligent tiering lifecycle rules
-      lifecycleRules: [
-        {
-          id: "transition-to-ia",
-          transitions: [
-            {
-              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
-              transitionAfter: cdk.Duration.days(30),
-            },
-          ],
-        },
-        {
-          id: "transition-to-glacier",
-          transitions: [
-            {
-              storageClass: s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
-              transitionAfter: cdk.Duration.days(90),
-            },
-          ],
-        },
-        {
-          id: "expire-objects",
-          expiration: cdk.Duration.days(config.fileUpload?.retentionDays || 365),
-        },
-        {
-          id: "abort-incomplete-multipart",
-          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
-        },
-      ],
-    });
-
-    // DynamoDB Table for file metadata
-    /**
-     * Schema:
-     *   PK: USER#{userId}, SK: FILE#{uploadId} - File metadata
-     *   PK: USER#{userId}, SK: QUOTA - User storage quota tracking
-     *   GSI1PK: CONV#{sessionId}, GSI1SK: FILE#{uploadId} - Query files by conversation
-     */
-    const userFilesTable = new dynamodb.Table(this, "UserFilesTable", {
-      tableName: getResourceName(config, "user-files"),
-      partitionKey: {
-        name: "PK",
-        type: dynamodb.AttributeType.STRING,
-      },
-      sortKey: {
-        name: "SK",
-        type: dynamodb.AttributeType.STRING,
-      },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
-      timeToLiveAttribute: "ttl",
-      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
-      encryption: dynamodb.TableEncryption.AWS_MANAGED,
-      removalPolicy: getRemovalPolicy(config),
-    });
-
-    // GSI1: SessionIndex - Query files by conversation/session
-    userFilesTable.addGlobalSecondaryIndex({
-      indexName: "SessionIndex",
-      partitionKey: {
-        name: "GSI1PK",
-        type: dynamodb.AttributeType.STRING,
-      },
-      sortKey: {
-        name: "GSI1SK",
-        type: dynamodb.AttributeType.STRING,
-      },
-      projectionType: dynamodb.ProjectionType.ALL,
-    });
-
-    // Store file upload resource names in SSM
-    new ssm.StringParameter(this, "UserFilesBucketNameParameter", {
-      parameterName: `/${config.projectPrefix}/file-upload/bucket-name`,
-      stringValue: userFilesBucket.bucketName,
-      description: "User files S3 bucket name",
-      tier: ssm.ParameterTier.STANDARD,
-    });
-
-    new ssm.StringParameter(this, "UserFilesBucketArnParameter", {
-      parameterName: `/${config.projectPrefix}/file-upload/bucket-arn`,
-      stringValue: userFilesBucket.bucketArn,
-      description: "User files S3 bucket ARN",
-      tier: ssm.ParameterTier.STANDARD,
-    });
-
-    new ssm.StringParameter(this, "UserFilesTableNameParameter", {
-      parameterName: `/${config.projectPrefix}/file-upload/table-name`,
-      stringValue: userFilesTable.tableName,
-      description: "User files metadata table name",
-      tier: ssm.ParameterTier.STANDARD,
-    });
-
-    new ssm.StringParameter(this, "UserFilesTableArnParameter", {
-      parameterName: `/${config.projectPrefix}/file-upload/table-arn`,
-      stringValue: userFilesTable.tableArn,
-      description: "User files metadata table ARN",
-      tier: ssm.ParameterTier.STANDARD,
-    });
 
     // ============================================================
     // ECS Task Definition
@@ -1025,6 +895,7 @@ export class AppApiStack extends cdk.Stack {
           'dynamodb:UpdateItem',
           'dynamodb:DeleteItem',
           'dynamodb:Query',
+          'dynamodb:Scan',
         ],
         resources: [apiKeysTableArn, `${apiKeysTableArn}/index/*`],
       })

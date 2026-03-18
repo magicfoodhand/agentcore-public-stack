@@ -324,6 +324,7 @@ export class InferenceApiStack extends cdk.Stack {
         'dynamodb:PutItem',
         'dynamodb:UpdateItem',
         'dynamodb:Query',
+        'dynamodb:Scan',
       ],
       resources: [
         apiKeysTableArn,
@@ -771,7 +772,13 @@ export class InferenceApiStack extends cdk.Stack {
     // NOTE: X-Ray TransactionSearchConfig is an account-level singleton.
     // It cannot be created via CloudFormation if it already exists.
     // Manage it via AWS CLI instead:
-    //   aws xray update-transaction-search-config --indexing-percentage <5|100>
+    // https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Enable-TransactionSearch.html#CloudWatch-Transaction-Search-EnableAPI
+
+    // NOTE: update account, partition, region before running next command
+    // $ aws logs put-resource-policy --policy-name MyResourcePolicy --policy-document '{ "Version": "2012-10-17",                              "Statement": [ { "Sid": "TransactionSearchXRayAccess", "Effect": "Allow", "Principal": { "Service": "xray.amazonaws.com" }, "Action": "logs:PutLogEvents", "Resource": [ "arn:partition:logs:region:account-id:log-group:aws/spans:*", "arn:partition:logs:region:account-id:log-group:/aws/application-signals/data:*" ], "Condition": { "ArnLike": { "aws:SourceArn": "arn:partition:xray:region:account-id:*" }, "StringEquals": { "aws:SourceAccount": "account-id" } } } ]}'
+    // $ aws xray update-trace-segment-destination --destination CloudWatchLogs
+    // # update <number>
+    // $ aws xray update-indexing-rule --name "Default" --rule '{"Probabilistic": {"DesiredSamplingPercentage": <nummber>}}'
 
     // ============================================================
     // Observability: Vended Log Deliveries for AgentCore Resources
@@ -927,7 +934,7 @@ export class InferenceApiStack extends cdk.Stack {
 
     dashboard.addWidgets(
       new cloudwatch.TextWidget({
-        markdown: `# AgentCore Runtime Observability\n**Project:** ${config.projectPrefix} | **Region:** ${config.awsRegion}`,
+        markdown: `# AgentCore Runtime Observability\n**Project:** ${config.projectPrefix} | **us-west-2:** ${config.awsRegion}`,
         width: 24,
         height: 1,
       }),

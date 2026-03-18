@@ -6,11 +6,12 @@ import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as s3 from "aws-cdk-lib/aws-s3";
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
-import { AppConfig, getResourceName, applyStandardTags, getRemovalPolicy } from './config';
+import { AppConfig, getResourceName, applyStandardTags, getRemovalPolicy, getAutoDeleteObjects, buildCorsOrigins } from './config';
 
 export interface InfrastructureStackProps extends cdk.StackProps {
   config: AppConfig;
@@ -509,7 +510,6 @@ export class InfrastructureStack extends cdk.Stack {
       pointInTimeRecovery: true,
       removalPolicy: getRemovalPolicy(config),
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
-      timeToLiveAttribute: "ttl",
     });
 
     // KeyHashIndex - O(1) lookup by key hash for API key authentication
@@ -1043,40 +1043,11 @@ export class InfrastructureStack extends cdk.Stack {
     // (manually or via a separate DNS stack). This stack looks up the
     // existing hosted zone and creates A records for the ALB.
     if (config.infrastructureHostedZoneDomain && config.infrastructureHostedZoneDomain.trim() !== '') {
-      const hostedZone = route53.HostedZone.fromLookup(this, 'HostedZone', {
-        domainName: config.infrastructureHostedZoneDomain,
-      });
-
-      // Export Hosted Zone ID to SSM for cross-stack references
-      new ssm.StringParameter(this, 'HostedZoneIdParameter', {
-        parameterName: `/${config.projectPrefix}/network/hosted-zone-id`,
-        stringValue: hostedZone.hostedZoneId,
-        description: 'Route53 Hosted Zone ID',
-        tier: ssm.ParameterTier.STANDARD,
-      });
-
-      // Export Hosted Zone Name to SSM
-      new ssm.StringParameter(this, 'HostedZoneNameParameter', {
-        parameterName: `/${config.projectPrefix}/network/hosted-zone-name`,
-        stringValue: hostedZone.zoneName,
-        description: 'Route53 Hosted Zone Name',
-        tier: ssm.ParameterTier.STANDARD,
-      });
-
       // ============================================================
       // Route53 A Record for ALB (Optional)
       // ============================================================
       if (config.albSubdomain) {
-        const albRecordName = `${config.albSubdomain}.${config.infrastructureHostedZoneDomain}`;
-
-        new route53.ARecord(this, 'AlbARecord', {
-          zone: hostedZone,
-          recordName: config.albSubdomain,
-          target: route53.RecordTarget.fromAlias(
-            new route53Targets.LoadBalancerTarget(this.alb)
-          ),
-          comment: `A record for ALB - points ${albRecordName} to load balancer`,
-        });
+        const albRecordName = `${config.albSubdomain}.${config.domainName}`;
 
         if (config.certificateArn) {
           new cdk.CfnOutput(this, 'AlbUrlHttps', {
@@ -1096,9 +1067,9 @@ export class InfrastructureStack extends cdk.Stack {
     let albUrl: string;
     let albUrlDescription: string;
     
-    if (config.infrastructureHostedZoneDomain && config.albSubdomain) {
+    if (config.albSubdomain) {
       // Use custom domain URL
-      const albRecordName = `${config.albSubdomain}.${config.infrastructureHostedZoneDomain}`;
+      const albRecordName = `${config.albSubdomain}.${config.domainName}`;
       const protocol = config.certificateArn ? 'https' : 'http';
       albUrl = `${protocol}://${albRecordName}`;
       albUrlDescription = 'Application Load Balancer Custom Domain URL';
@@ -1127,6 +1098,138 @@ export class InfrastructureStack extends cdk.Stack {
       parameterName: `/${config.projectPrefix}/oauth/callback-url`,
       stringValue: oauthCallbackUrl,
       description: 'OAuth callback URL for authentication provider configuration',
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
+    // ============================================================
+    // File Upload Storage (S3 + DynamoDB)
+    // ============================================================
+
+    // Build CORS origins for file upload bucket
+    const fileUploadCorsOrigins = buildCorsOrigins(config, config.fileUpload?.corsOrigins);
+
+    // S3 Bucket for user file uploads
+    const userFilesBucket = new s3.Bucket(this, "UserFilesBucket", {
+      // Include account ID for global uniqueness
+      bucketName: getResourceName(config, "user-files", config.awsAccount),
+
+      // Security configuration
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: false,
+
+      // Removal policy based on retention configuration
+      removalPolicy: getRemovalPolicy(config),
+      autoDeleteObjects: getAutoDeleteObjects(config),
+
+      // CORS for browser-based pre-signed URL uploads
+      cors: [
+        {
+          allowedOrigins: fileUploadCorsOrigins,
+          allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.HEAD],
+          allowedHeaders: ["Content-Type", "Content-Length", "x-amz-*"],
+          exposedHeaders: ["ETag", "Content-Length", "Content-Type"],
+          maxAge: 3600,
+        },
+      ],
+
+      // Intelligent tiering lifecycle rules
+      lifecycleRules: [
+        {
+          id: "transition-to-ia",
+          transitions: [
+            {
+              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: cdk.Duration.days(30),
+            },
+          ],
+        },
+        {
+          id: "transition-to-glacier",
+          transitions: [
+            {
+              storageClass: s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+              transitionAfter: cdk.Duration.days(90),
+            },
+          ],
+        },
+        {
+          id: "expire-objects",
+          expiration: cdk.Duration.days(config.fileUpload?.retentionDays || 365),
+        },
+        {
+          id: "abort-incomplete-multipart",
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
+      ],
+    });
+
+    // DynamoDB Table for file metadata
+    /**
+     * Schema:
+     *   PK: USER#{userId}, SK: FILE#{uploadId} - File metadata
+     *   PK: USER#{userId}, SK: QUOTA - User storage quota tracking
+     *   GSI1PK: CONV#{sessionId}, GSI1SK: FILE#{uploadId} - Query files by conversation
+     */
+    const userFilesTable = new dynamodb.Table(this, "UserFilesTable", {
+      tableName: getResourceName(config, "user-files"),
+      partitionKey: {
+        name: "PK",
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: "SK",
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      timeToLiveAttribute: "ttl",
+      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      removalPolicy: getRemovalPolicy(config),
+    });
+
+    // GSI1: SessionIndex - Query files by conversation/session
+    userFilesTable.addGlobalSecondaryIndex({
+      indexName: "SessionIndex",
+      partitionKey: {
+        name: "GSI1PK",
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: "GSI1SK",
+        type: dynamodb.AttributeType.STRING,
+      },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // Store file upload resource names in SSM
+    new ssm.StringParameter(this, "UserFilesBucketNameParameter", {
+      parameterName: `/${config.projectPrefix}/file-upload/bucket-name`,
+      stringValue: userFilesBucket.bucketName,
+      description: "User files S3 bucket name",
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
+    new ssm.StringParameter(this, "UserFilesBucketArnParameter", {
+      parameterName: `/${config.projectPrefix}/file-upload/bucket-arn`,
+      stringValue: userFilesBucket.bucketArn,
+      description: "User files S3 bucket ARN",
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
+    new ssm.StringParameter(this, "UserFilesTableNameParameter", {
+      parameterName: `/${config.projectPrefix}/file-upload/table-name`,
+      stringValue: userFilesTable.tableName,
+      description: "User files metadata table name",
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
+    new ssm.StringParameter(this, "UserFilesTableArnParameter", {
+      parameterName: `/${config.projectPrefix}/file-upload/table-arn`,
+      stringValue: userFilesTable.tableArn,
+      description: "User files metadata table ARN",
       tier: ssm.ParameterTier.STANDARD,
     });
 

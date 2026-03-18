@@ -162,6 +162,24 @@ configure_inference_api() {
     echo ""
 }
 
+configure_rag_ingestion() {
+    log_header "Configure RAG Ingestion Stack"
+    
+    echo "Configure RAG Ingestion (AgentCore Runtime) settings (press Enter to keep current/default values):"
+    echo ""
+    
+    prompt_for_config "CDK_RAG_INGESTION_ENABLED" "Enable Inference API Stack (true/false)" ".ragIngestion.enabled"
+    prompt_for_config "CDK_RAG_INGESTION_MEMORY" "Memory in MB (512, 1024, 2048, 4096, 8192)" ".ragIngestion.lambdaMemorySize"
+    prompt_for_config "CDK_RAG_INGESTION_TIMEOUT" "Timeout in Seconds" ".ragIngestion.lambdaTimeout"
+    prompt_for_config "CDK_RAG_INGESTION_EMBEDDING_MODEL" "Embedding Model" ".ragIngestion.embeddingModel"
+    prompt_for_config "CDK_RAG_INGESTION_VECTOR_DIMENSION" "Vector Dimension" ".ragIngestion.vectorDimension"
+    prompt_for_config "CDK_RAG_INGESTION_VECTOR_DISTANCE_METRIC" "Vector Distance Metric" ".ragIngestion.vectorDistanceMetric"
+
+    echo ""
+    log_success "Configuration updated"
+    echo ""
+}
+
 configure_gateway() {
     log_header "Configure Gateway Stack"
     
@@ -292,10 +310,11 @@ OPTIONS:
 
 STACKS:
     1. Infrastructure Stack - Foundation layer (VPC, ALB, ECS Cluster)
-    2. App API Stack        - Application API on Fargate
+    2. RAG Ingestion Stack  - RAG Ingestion
     3. Inference API Stack  - AgentCore Runtime with Memory & Tools
-    4. Gateway Stack        - MCP Gateway with Lambda tools
-    5. Frontend Stack       - S3 + CloudFront + Route53
+    4. App API Stack        - Application API on Fargate
+    5. Gateway Stack        - MCP Gateway with Lambda tools
+    6. Frontend Stack       - S3 + CloudFront + Route53
 
 EXAMPLES:
     ./deploy.sh                     # Interactive menu with full pipeline
@@ -777,6 +796,92 @@ deploy_inference_api() {
     return 0
 }
 
+deploy_rag_ingestion() {
+    # Prompt for configuration
+    configure_rag_ingestion
+    
+    log_header "Rag STACK - Full Pipeline Deployment"
+    
+    STACK_START_TIME=$(start_timer)
+    local stack_name="RAG Ingestion"
+    
+    # Pipeline steps
+    local total_steps=10
+    local current_step=0
+    
+    # Step 1: Install system dependencies
+    current_step=$((current_step + 1))
+    execute_pipeline_step $current_step $total_steps \
+        "Install system dependencies" \
+        "${PROJECT_ROOT}/scripts/common/install-deps.sh" || return 1
+    
+    # Step 2: Install Python dependencies
+    current_step=$((current_step + 1))
+    execute_pipeline_step $current_step $total_steps \
+        "Install Python dependencies" \
+        "${PROJECT_ROOT}/scripts/stack-rag-ingestion/install.sh" || return 1
+    
+    # Step 3: Build ARM64 Docker image
+    current_step=$((current_step + 1))
+    execute_pipeline_step $current_step $total_steps \
+        "Build ARM64 Docker image (AgentCore Runtime)" \
+        "${PROJECT_ROOT}/scripts/stack-rag-ingestion/build.sh" || return 1
+    
+    # Step 4: Test Docker container
+    if [ "$SKIP_TESTS" = false ]; then
+        current_step=$((current_step + 1))
+        execute_pipeline_step $current_step $total_steps \
+            "Test ARM64 Docker container" \
+            "${PROJECT_ROOT}/scripts/stack-rag-ingestion/test-docker.sh" || return 1
+    else
+        current_step=$((current_step + 1))
+        log_warning "Step ${current_step}/${total_steps}: Docker tests skipped"
+    fi
+    
+    # Step 5: Build CDK
+    current_step=$((current_step + 1))
+    execute_pipeline_step $current_step $total_steps \
+        "Build CDK stack (compile TypeScript)" \
+        "${PROJECT_ROOT}/scripts/stack-rag-ingestion/build-cdk.sh" || return 1
+    
+    # Step 6: Synthesize CloudFormation
+    current_step=$((current_step + 1))
+    execute_pipeline_step $current_step $total_steps \
+        "Synthesize CloudFormation templates" \
+        "${PROJECT_ROOT}/scripts/stack-rag-ingestion/synth.sh" || return 1
+    
+    # Step 7: Test CDK
+    if [ "$SKIP_TESTS" = false ]; then
+        current_step=$((current_step + 1))
+        execute_pipeline_step $current_step $total_steps \
+            "Validate CDK templates" \
+            "${PROJECT_ROOT}/scripts/stack-rag-ingestion/test-cdk.sh" || return 1
+    else
+        current_step=$((current_step + 1))
+        log_warning "Step ${current_step}/${total_steps}: CDK tests skipped"
+    fi
+    
+    # Step 8: Push Docker image to ECR
+    current_step=$((current_step + 1))
+    execute_pipeline_step $current_step $total_steps \
+        "Push ARM64 Docker image to ECR" \
+        "${PROJECT_ROOT}/scripts/stack-rag-ingestion/push-to-ecr.sh" || return 1
+    
+    # Step 9: Deploy stack
+    current_step=$((current_step + 1))
+    execute_pipeline_step $current_step $total_steps \
+        "Deploy Rag Ingestion Stack (AgentCore Runtime)" \
+        "${PROJECT_ROOT}/scripts/stack-rag-ingestion/deploy.sh" || return 1
+    
+    local stack_elapsed=$(elapsed_time $STACK_START_TIME)
+    log_success "Rag Ingestion Stack deployed successfully in ${stack_elapsed}"
+    
+    DEPLOYMENT_RESULTS[$stack_name]="SUCCESS"
+    DEPLOYMENT_URLS[$stack_name]="AgentCore Runtime endpoint available"
+    
+    return 0
+}
+
 deploy_gateway() {
     # Prompt for configuration
     configure_gateway
@@ -968,14 +1073,10 @@ deploy_all() {
         fi
     fi
     
-    echo ""
-    read -p "Press Enter to continue to next stack..."
-    echo ""
-    
-    # 2. App API (depends on Infrastructure)
-    if ! deploy_app_api; then
-        failed_stacks+=("App API")
-        DEPLOYMENT_RESULTS["App API"]="FAILED"
+    # 2. RAG Ingestion
+    if ! deploy_rag_ingestion; then
+        failed_stacks+=("Infrastructure")
+        DEPLOYMENT_RESULTS["Infrastructure"]="FAILED"
         if [ "$CONTINUE_ON_ERROR" = false ]; then
             show_deployment_summary
             return 1
@@ -985,8 +1086,8 @@ deploy_all() {
     echo ""
     read -p "Press Enter to continue to next stack..."
     echo ""
-    
-    # 3. Inference API (depends on Infrastructure)
+
+        # 3. Inference API (depends on Infrastructure)
     if ! deploy_inference_api; then
         failed_stacks+=("Inference API")
         DEPLOYMENT_RESULTS["Inference API"]="FAILED"
@@ -1000,7 +1101,21 @@ deploy_all() {
     read -p "Press Enter to continue to next stack..."
     echo ""
     
-    # 4. Gateway (independent, but Inference API integrates with it)
+    # 4. App API (depends on Infrastructure)
+    if ! deploy_app_api; then
+        failed_stacks+=("App API")
+        DEPLOYMENT_RESULTS["App API"]="FAILED"
+        if [ "$CONTINUE_ON_ERROR" = false ]; then
+            show_deployment_summary
+            return 1
+        fi
+    fi
+    
+    echo ""
+    read -p "Press Enter to continue to next stack..."
+    echo ""
+    
+    # 5. Gateway (independent, but Inference API integrates with it)
     if ! deploy_gateway; then
         failed_stacks+=("Gateway")
         DEPLOYMENT_RESULTS["Gateway"]="FAILED"
@@ -1014,7 +1129,7 @@ deploy_all() {
     read -p "Press Enter to continue to next stack..."
     echo ""
     
-    # 5. Frontend (independent)
+    # 6. Frontend (independent)
     if ! deploy_frontend; then
         failed_stacks+=("Frontend")
         DEPLOYMENT_RESULTS["Frontend"]="FAILED"
@@ -1054,15 +1169,20 @@ EOF
     local details="${DEPLOYMENT_URLS[Infrastructure]:-N/A}"
     printf "│ %-23s │ %-8s │ %-38s │\n" "Infrastructure" "$status" "$details"
     
-    # App API
-    status="${DEPLOYMENT_RESULTS[App API]:-NOT DEPLOYED}"
-    details="${DEPLOYMENT_URLS[App API]:-N/A}"
-    printf "│ %-23s │ %-8s │ %-38s │\n" "App API" "$status" "$details"
+    # RAG Ingestion
+    status="${DEPLOYMENT_RESULTS[RAG Ingestion]:-NOT DEPLOYED}"
+    details="${DEPLOYMENT_URLS[RAG Ingestion]:-N/A}"
+    printf "│ %-23s │ %-8s │ %-38s │\n" "RAG Ingestion" "$status" "$details"
     
     # Inference API
     status="${DEPLOYMENT_RESULTS[Inference API]:-NOT DEPLOYED}"
     details="${DEPLOYMENT_URLS[Inference API]:-N/A}"
     printf "│ %-23s │ %-8s │ %-38s │\n" "Inference API" "$status" "$details"
+
+    # App API
+    status="${DEPLOYMENT_RESULTS[App API]:-NOT DEPLOYED}"
+    details="${DEPLOYMENT_URLS[App API]:-N/A}"
+    printf "│ %-23s │ %-8s │ %-38s │\n" "App API" "$status" "$details"
     
     # Gateway
     status="${DEPLOYMENT_RESULTS[Gateway]:-NOT DEPLOYED}"
@@ -1143,34 +1263,38 @@ Current Configuration:
   1) 🏗️  Infrastructure Stack     VPC, ALB, ECS Cluster, Security Groups
                                   (6 steps: install → build → test → synth → deploy)
 
-  2) 🚀 App API Stack            Application API on Fargate
+  2)    Rag                       Rag Ingestion
                                   (10 steps: install → build-docker → test → 
                                    build-cdk → synth → push-ecr → deploy)
-
+    
   3) 🤖 Inference API Stack      AgentCore Runtime with Memory & Tools
                                   (10 steps: install → build-docker → test → 
                                    build-cdk → synth → push-ecr → deploy)
 
-  4) 🌐 Gateway Stack            MCP Gateway with Lambda tools
+  4) 🚀 App API Stack            Application API on Fargate
+                                  (10 steps: install → build-docker → test → 
+                                   build-cdk → synth → push-ecr → deploy)
+
+  5) 🌐 Gateway Stack            MCP Gateway with Lambda tools
                                   (7 steps: install → build-cdk → synth → 
                                    test → deploy → verify)
 
-  5) 💻 Frontend Stack           Angular + S3 + CloudFront
+  6) 💻 Frontend Stack           Angular + S3 + CloudFront
                                   (9 steps: install → build → test → build-cdk → 
                                    synth → deploy-cdk → deploy-assets)
 
 ─────────────────────────────────────────────────────────────────────────────
 
-  6) 🚢 Deploy All Stacks        Full deployment in dependency order
+  7) 🚢 Deploy All Stacks        Full deployment in dependency order
                                   (Infrastructure → App → Inference → Gateway → Frontend)
 
-  7) ❌ Exit
+  8) ❌ Exit
 
 ─────────────────────────────────────────────────────────────────────────────
 
 EOF
     
-    read -p "Select an option (1-7): " choice
+    read -p "Select an option (1-8): " choice
     echo ""
 }
 
@@ -1186,21 +1310,24 @@ main_menu() {
                 deploy_infrastructure
                 ;;
             2)
-                deploy_app_api
+                deploy_rag_ingestion
                 ;;
             3)
                 deploy_inference_api
                 ;;
             4)
-                deploy_gateway
+                deploy_app_api
                 ;;
             5)
-                deploy_frontend
+                deploy_gateway
                 ;;
             6)
-                deploy_all
+                deploy_frontend
                 ;;
             7)
+                deploy_all
+                ;;
+            8)
                 log_info "Exiting deployment orchestration"
                 exit 0
                 ;;
