@@ -1,5 +1,5 @@
 # Multi-stage build for App API
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 
 # Set working directory
 WORKDIR /app
@@ -15,12 +15,12 @@ RUN apt-get update && apt-get install -y \
 COPY backend/pyproject.toml backend/README.md ./
 COPY backend/src ./src
 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Install Python dependencies from pyproject.toml with agentcore extras
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir ".[agentcore]"
+RUN uv pip install --system --no-cache-dir ".[agentcore]"
 
 # Production stage
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Set working directory
 WORKDIR /app
@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application code
